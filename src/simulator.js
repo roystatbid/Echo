@@ -12,6 +12,11 @@ import { DEFAULTS } from './sonar.js';
  * supposed to look like before blaming the room.
  */
 
+// Stand-in for an iPad with landscape stereo: speakers at opposite ends, and
+// the mic nearer one of them.
+const SPEAKER_SEPARATION = 0.22; // metres
+const SECOND_SPEAKER_DIRECT_EXTRA = 0.20; // metres further from the mic
+
 const ROOM = {
   // A 5 x 4 m room with the listener a bit off-centre, plus two obstacles.
   width: 5, height: 4, x: 2.2, y: 1.6,
@@ -65,6 +70,7 @@ export class SimulatedSonar {
     this.getBearing = () => 0;
     this.simulated = true;
     this.room = ROOM;
+    this.outputChannels = 2;
   }
 
   get band() { return BANDS[this.opts.band] ?? BANDS.balanced; }
@@ -90,6 +96,7 @@ export class SimulatedSonar {
   set(key, value) {
     this.opts[key] = value;
     if (['band', 'chirpMs', 'maxRange', 'speakerMic', 'blindRange'].includes(key)) this._build();
+    if (key === 'speaker') this._status(`Simulating ${key === 'speaker' && value === 'both' ? 'both speakers' : 'a single speaker'}`);
     if (key === 'cfarScale' && this.analyzer) this.analyzer.cfarScale = value;
     if (key === 'pingRate' && this.timer) {
       clearInterval(this.timer);
@@ -106,8 +113,17 @@ export class SimulatedSonar {
         this._status(`Calibrating… ${n}/${pings}`, { calibrating: n / pings });
         if (n >= pings) {
           clearInterval(t);
+          const secondaryPulse = this.opts.speaker === 'both'
+            ? {
+                lagSamples: SECOND_SPEAKER_DIRECT_EXTRA * (this.sampleRate / SPEED_OF_SOUND),
+                pathMetres: SECOND_SPEAKER_DIRECT_EXTRA,
+                rangeBias: SECOND_SPEAKER_DIRECT_EXTRA / 2,
+                ratio: 1,
+              }
+            : null;
+          this.lastCalibration = { pings, referenceLength: 0, secondaryPulse };
           this._status('Calibrated', { calibrated: true });
-          resolve({ pings, referenceLength: 0 });
+          resolve(this.lastCalibration);
         }
       }, 1000 / this.opts.pingRate);
     });
@@ -144,7 +160,16 @@ export class SimulatedSonar {
 
     // Keep well clear of full scale: a simulated ping that pins the input
     // would trip the clipping warning the real path uses.
-    add(a.preGuard, 0.6);
+    // Model both speakers when the user asks for both, so the demo shows the
+    // doubled echoes and the rival direct blast rather than just describing them.
+    const both = this.opts.speaker === 'both';
+    const perMetre = sr / SPEED_OF_SOUND;
+
+    // Split the level across the speakers rather than doubling it, matching
+    // what a mono buffer fanned out to two channels actually does.
+    const drive = both ? 0.45 : 0.6;
+    add(a.preGuard, drive);
+    if (both) add(a.preGuard + SECOND_SPEAKER_DIRECT_EXTRA * perMetre, drive);
 
     // The beam is wide, so sample a fan of rays rather than a single one.
     const half = 22 * Math.PI / 180;
@@ -153,8 +178,15 @@ export class SimulatedSonar {
       const r = castRay(this.room, this.room.x, this.room.y, th, this.opts.maxRange * 1.2);
       if (!isFinite(r) || r > this.opts.maxRange) continue;
       const lag = ((2 * r - this.opts.speakerMic) / SPEED_OF_SOUND) * sr;
-      const amp = 0.17 / (1 + 3 * r * r) * (1 - 0.35 * Math.abs(k) / 2);
+      const amp = (drive / 0.6) * 0.17 / (1 + 3 * r * r) * (1 - 0.35 * Math.abs(k) / 2);
       add(a.preGuard + lag, amp);
+      if (both) {
+        // In the far field the second speaker's extra path is the projection of
+        // the speaker separation onto the bearing, so the ghost slides in and
+        // out as the device turns.
+        const extra = SPEAKER_SEPARATION * Math.cos(th);
+        add(a.preGuard + lag + extra * perMetre, amp);
+      }
     }
 
     for (let i = 0; i < rx.length; i++) rx[i] += 0.00055 * (Math.random() * 2 - 1);

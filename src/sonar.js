@@ -45,8 +45,15 @@ const RING_SECONDS = 4;
 const CHUNK = 1024;
 const LOCK_SPAN_SEC = 0.35;
 
+export const SPEAKERS = {
+  left:  { label: 'Left only',  hint: 'One speaker. Clean, unambiguous echoes.' },
+  right: { label: 'Right only', hint: 'The other speaker. Try both and keep whichever locks more strongly.' },
+  both:  { label: 'Both',       hint: 'About 3 dB more reach, but doubles every echo unless the two speakers sit together.' },
+};
+
 export const DEFAULTS = {
   band: 'balanced',
+  speaker: 'left',
   chirpMs: 5,
   maxRange: 6,
   pingRate: 10,
@@ -180,6 +187,18 @@ export class Sonar {
     }
     if (!this.ctx) return;
 
+    if (key === 'speaker') {
+      this.chirpBuffer = this._buildChirpBuffer();
+      // The clutter template and the captured reference both belong to the
+      // speaker they were measured from. Keeping them would subtract the wrong
+      // signature and leave a residue that reads as a wall half a metre away.
+      if (wasCalibrated) {
+        this.analyzer.clearCalibration();
+        this._status('Speaker changed — recalibrate');
+      }
+      return;
+    }
+
     if (['band', 'chirpMs', 'maxRange', 'speakerMic', 'blindRange'].includes(key)) {
       const rebuildPulse = ['band', 'chirpMs'].includes(key);
       this._buildWaveform();
@@ -214,8 +233,7 @@ export class Sonar {
       sampleRate: sr, f0: b.f0, f1: b.f1,
       duration: this.opts.chirpMs / 1000, taper: 0.3,
     });
-    this.chirpBuffer = this.ctx.createBuffer(1, this.chirp.length, sr);
-    this.chirpBuffer.copyToChannel(this.chirp, 0);
+    this.chirpBuffer = this._buildChirpBuffer();
 
     this.analyzer = new PingAnalyzer({
       sampleRate: sr, chirp: this.chirp, f0: b.f0, f1: b.f1,
@@ -237,6 +255,45 @@ export class Sonar {
     // valid and shouldn't be silently thrown away.
     if (samePulse) this.analyzer.adoptCalibration(previous);
     this._builtSignature = this._pulseSignature;
+  }
+
+  /**
+   * Put the chirp on one output channel and silence on the other.
+   *
+   * iPads with landscape stereo have their speakers at opposite ends, 20 cm or
+   * so apart. Firing both means the mic hears two direct blasts and two copies
+   * of every echo, split by half the speaker separation, with the split
+   * swinging as the device turns. Worse, the time origin latches onto whichever
+   * blast is louder at that moment, so it can flip and bias every range at once.
+   *
+   * Driving a single channel costs about 3 dB of reach and removes all of that.
+   * Some iPads put both speakers on the same edge, where the split is too small
+   * to matter and 'both' is the better choice — calibration measures which case
+   * you're in and says so.
+   */
+  _buildChirpBuffer() {
+    const max = this.ctx.destination.maxChannelCount || 2;
+    const channels = Math.min(2, Math.max(1, max));
+    const buf = this.ctx.createBuffer(channels, this.chirp.length, this.sampleRate);
+    const which = this.opts.speaker ?? 'left';
+
+    for (let c = 0; c < channels; c++) {
+      const on = channels === 1 || which === 'both'
+        || (which === 'left' && c === 0)
+        || (which === 'right' && c === 1);
+      if (on) buf.copyToChannel(this.chirp, c);
+    }
+
+    // Stop the graph from folding our silent channel back into the live one.
+    try {
+      this.ctx.destination.channelCount = Math.min(channels, max);
+      this.outGain.channelCount = channels;
+      this.outGain.channelCountMode = 'explicit';
+      this.outGain.channelInterpretation = 'discrete';
+    } catch {}
+
+    this.outputChannels = channels;
+    return buf;
   }
 
   _schedule(time) {
@@ -386,7 +443,8 @@ export class Sonar {
     this.calibration = null;
     try {
       const result = this.analyzer.calibrateFrom(cal.windows);
-      this._status('Calibrated', { calibrated: true });
+      this.lastCalibration = result;
+      this._status('Calibrated', { calibrated: true, ...result });
       cal.resolve(result);
     } catch (err) {
       this._status(`Calibration failed: ${err.message}`);

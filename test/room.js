@@ -62,14 +62,21 @@ export class Room {
   /**
    * @param {object} o
    * @param {number[]} o.walls ranges in metres
-   * @param {number} o.speakerMic metres between speaker and mic
+   * @param {number} o.speakerMic metres between the reference speaker and the mic
+   * @param {Array<{directExtra: number, echoExtra: number, gain: number}>} [o.speakers]
+   *   Additional speakers beyond the reference one. `directExtra` is how much
+   *   further this speaker's direct path to the mic is; `echoExtra` is how much
+   *   further its out-and-back path to a wall is, which in the far field is the
+   *   projection of the speaker separation onto the bearing (so it swings
+   *   between plus and minus the separation as the device turns).
    */
-  constructor({ sampleRate, chirp, speakerMic = 0.15, walls = [], noise = 0.0008, seed = 7, ringAmp = 0.08 }) {
+  constructor({ sampleRate, chirp, speakerMic = 0.15, walls = [], noise = 0.0008, seed = 7, ringAmp = 0.08, speakers = [] }) {
     this.sampleRate = sampleRate;
     this.chirp = chirp;
     this.speakerMic = speakerMic;
     this.walls = walls;
     this.noise = noise;
+    this.speakers = speakers;
     this.rand = rng(seed);
 
     const spk = speakerResponse(sampleRate);
@@ -105,14 +112,22 @@ export class Room {
       }
     };
 
-    add(this.directPulse, directAt, gain);
+    const perMetre = this.sampleRate / SPEED_OF_SOUND;
+    const sources = [{ directExtra: 0, echoExtra: 0, gain: 1 }, ...this.speakers];
+
+    for (const s of sources) {
+      add(this.directPulse, directAt + s.directExtra * perMetre, gain * (s.gain ?? 1));
+    }
     for (const w of walls) {
       const r = typeof w === 'number' ? w : w.range;
       const reflect = typeof w === 'number' ? 0.5 : (w.reflectivity ?? 0.5);
       // Spherical spreading over the round trip, plus a sign flip on some
       // surfaces. Magnitude detection shouldn't care about the sign.
-      const amp = gain * reflect / (1 + 4 * r * r) * (this.rand() < 0.3 ? -1 : 1);
-      add(this.echoPulse, directAt + this.lagFor(r), amp);
+      const sign = this.rand() < 0.3 ? -1 : 1;
+      for (const s of sources) {
+        const amp = gain * (s.gain ?? 1) * reflect / (1 + 4 * r * r) * sign;
+        add(this.echoPulse, directAt + this.lagFor(r) + s.echoExtra * perMetre, amp);
+      }
     }
 
     if (this.noise > 0) {

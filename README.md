@@ -72,6 +72,42 @@ In simulation this drops the near-field clutter pedestal by more than 8× (about
 30× at 0.3 m), which is the difference between seeing a wall at half a metre and
 not.
 
+**Only one speaker fires.** iPads with landscape stereo have their speakers at
+opposite ends, 20 cm or so apart, and Web Audio sends a mono buffer to both.
+That does two bad things:
+
+- Every wall returns twice, split by half the speaker separation — and the
+  split *swings with bearing* as you turn, because it's the projection of the
+  speaker separation onto the direction of the wall. A fixed offset could be
+  calibrated away; a moving one can't. Measured in simulation with a 22 cm
+  separation and a wall at 2.40 m: 11 cm apart dead ahead, 5 cm at 60° off-axis.
+- Worse, the time origin latches onto whichever blast is momentarily louder,
+  and that depends on frequency, on orientation, and on whether a hand is over
+  a speaker. Crossing that point shifts **every** range in the profile at once
+  — 10 cm in the same simulation, from 2.40 m to 2.30 m, with nothing on screen
+  to indicate it happened.
+
+So the chirp goes into one output channel and silence into the other, at a cost
+of about 3 dB of reach. Some iPads put both speakers on the same edge, where the
+split falls inside a single resolution cell and `Both` is simply better; that's
+why it stays a setting. **Calibration measures which case you're in** and tells
+you — it correlates the recorded blast against the ideal chirp, looks for a
+second arrival, and reports its path offset. In testing it recovers a 12, 20 or
+30 cm separation exactly, and stays quiet at 0 and 5 cm where there's nothing
+worth worrying about.
+
+Two subtleties worth knowing if you go digging:
+
+- The check has to run on the raw calibration recordings, before the captured
+  blast is promoted to the filter reference. Once it is, the inverse filter
+  *partially deconvolves* the twin blast and hides it. That deconvolution is
+  real and does steady the lock afterwards — but it can't touch the echo ghosts,
+  whose spacing keeps changing with bearing.
+- The direct blast is taken as the *loudest* arrival, not the earliest. Sound
+  also travels through the aluminium case at roughly 5000 m/s, arriving well
+  before the airborne path, and anchoring to that would put a constant bias on
+  every reading. The loudest arrival is the one that tracks the acoustic path.
+
 **Detection is statistical, not a fixed threshold.** The noise floor varies
 enormously across a single profile — huge just after the blast, tiny at long
 range. Echo uses a smallest-of CFAR: for each range cell, estimate the noise
@@ -131,11 +167,13 @@ it's the most convincing demonstration that any of this is real.
 
 | Setting | What it does |
 |---|---|
+| **Speaker** | Which output channel carries the chirp. Default is a single speaker; see above for why. Calibrate after changing it — the clutter template belongs to the speaker it was measured from, and Echo discards it for you rather than subtracting the wrong signature. |
 | **Chirp band** | *Quiet* (14–21 kHz) is near-ultrasonic and most adults barely hear it — though children and dogs will. *Balanced* (6–20 kHz) is the best all-rounder. *Long* (2–18 kHz) is loud and annoying but reaches furthest. |
 | **Volume** | Louder reaches further, but clipping the microphone destroys the measurement. Watch the clipping indicator. |
 | **Sensitivity** | The CFAR factor from the table above. Lower finds fainter walls and invents more phantoms. |
 | **Speaker↔mic spacing** | The physical gap between the speaker and microphone on your iPad. An echo arrives `(2R − d)/c` after the blast, so getting `d` wrong puts a constant bias of `d/2` on every reading. The 15 cm default is a reasonable guess; measure yours and it'll get more accurate. |
 | **Blind zone** | Everything closer than this is ignored, because the speaker is still ringing. Lower it after calibrating. |
+
 
 ## Honest limitations
 
@@ -157,6 +195,14 @@ it's the most convincing demonstration that any of this is real.
   quietly than usual. If the app can't find its own chirp it will say so.
 - **Speed of sound** is assumed to be 343 m/s (roughly 20 °C). Cold air is
   slower; at 0 °C readings run about 2% long.
+- **Channel routing isn't guaranteed.** Whether iOS actually keeps the silent
+  channel silent while the microphone is live can only be discovered on the
+  hardware. Calibrate and check the *second pulse* line in Diagnostics: `none`
+  means the routing took, a distance means both speakers are still firing.
+- **iPadOS rotates the stereo image**, so "left" follows the physical left edge
+  as you turn the device. The two speakers sit at slightly different distances
+  from the microphone, so flipping the iPad end-for-end can shift readings by a
+  centimetre or two.
 
 ## Trying it without a microphone
 
@@ -165,6 +211,10 @@ desk and a cupboard in it, synthesises the received audio, and pushes it through
 the real analysis chain — the same matched filter, CFAR and peak detection that
 live audio gets. Useful for seeing what a clean signal is supposed to look like
 before blaming the room.
+
+It also models the stereo speakers, so switching *Speaker* to `Both` in the
+simulator shows the doubled returns and the ghost sliding with bearing rather
+than just describing them.
 
 ## Layout
 
@@ -191,11 +241,12 @@ instead of only being able to observe it on the device.
 npm test
 ```
 
-44 tests, no dependencies. They cover the FFT against a naive DFT, range
+51 tests, no dependencies. They cover the FFT against a naive DFT, range
 accuracy to within 1.5 cm across 0.4 m to 4.8 m, separating two walls one
 resolution cell apart, sidelobe level, CFAR false-alarm rate, clutter
-suppression, behaviour when the output level changes mid-session, and the
-orientation maths across device poses.
+suppression, behaviour when the output level changes mid-session, the
+stereo-speaker failure modes above, and the orientation maths across device
+poses.
 
 The orientation tests are worth a particular mention: the bearing calculation
 blends "up the screen" with "out the back of the slab" according to how the iPad

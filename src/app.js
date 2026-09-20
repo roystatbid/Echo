@@ -1,5 +1,5 @@
 import { BANDS, rangeResolution } from './chirp.js';
-import { Sonar, DEFAULTS } from './sonar.js';
+import { Sonar, DEFAULTS, SPEAKERS } from './sonar.js';
 import { SimulatedSonar } from './simulator.js';
 import { HeadingSource, wrapAngle } from './heading.js';
 import { RadarDisplay } from './radar.js';
@@ -22,7 +22,7 @@ const ui = {
   radar: $('radar'), scope: $('scope'),
   rangeBig: $('range-big'), rangeSub: $('range-sub'), hint: $('hint'),
   settings: $('settings'), diagnostics: $('diagnostics'), toast: $('toast'),
-  bandHint: $('band-hint'), splashError: $('splash-error'),
+  bandHint: $('band-hint'), speakerHint: $('speaker-hint'), splashError: $('splash-error'),
 };
 
 const settings = loadSettings();
@@ -205,9 +205,16 @@ function updateHint() {
   if (ui.hint.textContent !== msg) ui.hint.textContent = msg;
 }
 
+/** Renders a getUserMedia constraint that we asked to be off. */
+function flag(v) {
+  if (v === undefined || v === null) return 'not reported';
+  return v ? 'ON — bad' : 'off';
+}
+
 function updateDiagnostics() {
   const rate = pingRate();
   const b = sonar?.band ?? BANDS[settings.band];
+  const ts = sonar?.trackSettings ?? {};
   const rows = [
     ['sample rate', sonar?.sampleRate ? `${(sonar.sampleRate / 1000).toFixed(1)} kHz` : '—'],
     ['band', `${(b.f0 / 1000).toFixed(1)}–${(b.f1 / 1000).toFixed(1)} kHz`],
@@ -220,6 +227,16 @@ function updateDiagnostics() {
     ['noise floor', lastProfile ? lastProfile.noise.toExponential(1) : '—'],
     ['calibrated', sonar?.calibrated ? 'yes' : 'no'],
     ['cancelling', lastProfile?.cancelled ? 'yes' : 'no'],
+    ['speaker', settings.speaker],
+    ['output channels', sonar?.outputChannels ?? '—'],
+    ['second pulse', sonar?.lastCalibration?.secondaryPulse
+      ? `${(sonar.lastCalibration.secondaryPulse.pathMetres * 100).toFixed(0)} cm`
+      : (sonar?.lastCalibration ? 'none' : '—')],
+    ['mic channels', ts.channelCount ?? '—'],
+    // iOS is asked to turn these off; whether it did can only be seen here.
+    ['echo cancel', flag(ts.echoCancellation)],
+    ['auto gain', flag(ts.autoGainControl)],
+    ['noise suppress', flag(ts.noiseSuppression)],
     ['heading source', heading?.mode ?? 'none'],
     ['screen angle', heading ? `${heading.screenAngle}°` : '—'],
     ['coverage', radar ? `${Math.round(radar.coverage * 100)}%` : '—'],
@@ -274,9 +291,20 @@ $('btn-stop').addEventListener('click', () => {
 $('btn-calibrate').addEventListener('click', async () => {
   if (!sonar) return;
   try {
-    await sonar.calibrate();
+    const result = await sonar.calibrate();
     radar?.clear();
-    toast('Calibrated — the device’s own sound is now subtracted');
+
+    // Whether the channel routing actually took effect can only be discovered
+    // on the hardware, so report what the calibration measured rather than
+    // assuming.
+    const second = result?.secondaryPulse;
+    if (second && settings.speaker !== 'both') {
+      toast(`Second pulse ${(second.pathMetres * 100).toFixed(0)} cm behind — try the other speaker`);
+    } else if (second) {
+      toast(`Both speakers firing, ${(second.pathMetres * 100).toFixed(0)} cm apart — pick one`);
+    } else {
+      toast('Calibrated — the device’s own sound is now subtracted');
+    }
   } catch (err) {
     toast(`Couldn’t calibrate: ${err.message}`);
   }
@@ -321,6 +349,17 @@ function buildSettingsPanel() {
   bandSel.onchange = () => {
     applySetting('band', bandSel.value);
     ui.bandHint.textContent = BANDS[bandSel.value].hint;
+  };
+
+  const spkSel = $('opt-speaker');
+  spkSel.innerHTML = Object.entries(SPEAKERS)
+    .map(([key, s]) => `<option value="${key}">${s.label}</option>`)
+    .join('');
+  spkSel.value = settings.speaker;
+  ui.speakerHint.textContent = SPEAKERS[settings.speaker].hint;
+  spkSel.onchange = () => {
+    applySetting('speaker', spkSel.value);
+    ui.speakerHint.textContent = SPEAKERS[spkSel.value].hint;
   };
 
   for (const [key, spec] of Object.entries(SLIDERS)) {

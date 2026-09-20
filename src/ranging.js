@@ -203,6 +203,16 @@ export class PingAnalyzer {
     const sr = this.sampleRate;
     if (!windows.length) throw new Error('No calibration pings captured');
 
+    // Check for a rival speaker first, on the untouched windows.
+    //
+    // It has to happen here for two reasons. The averaged reference below is
+    // cut relative to whichever blast was loudest, which clips the other one;
+    // and once that reference is installed, the inverse filter partially
+    // deconvolves the twin blast and hides the very thing we want to report.
+    // (That deconvolution is real, and does steady the lock afterwards, but it
+    // cannot touch the echo ghosts, whose spacing changes with bearing.)
+    const secondaryPulse = this._detectSecondary(windows);
+
     // Pass 1 - stack the raw blasts, each cut at the same offset before its
     // own peak so they add coherently instead of smearing.
     const pre = Math.round(0.0005 * sr);
@@ -250,7 +260,104 @@ export class PingAnalyzer {
     for (let i = 0; i < profLen; i++) { sRe[i] /= stacked; sIm[i] /= stacked; }
 
     this.clutter = { re: sRe, im: sIm, frac: baseFrac ?? 0, directAmp: ampSum / stacked };
-    return { pings: stacked, referenceLength: refLen };
+    return { pings: stacked, referenceLength: refLen, secondaryPulse };
+  }
+
+  /**
+   * Look for a second direct pulse right behind the first one.
+   *
+   * An iPad with stereo speakers fires both unless told otherwise, and the two
+   * are at different distances from the microphone. That shows up here as a
+   * distinct compressed peak a few tens of samples after the main blast, and it
+   * causes two separate problems:
+   *
+   *   - Every wall returns twice, split by half the speaker separation, and the
+   *     split swings with bearing as the device turns.
+   *   - Worse, the time origin snaps to whichever blast is momentarily louder.
+   *     That is a function of frequency, orientation and whether a hand is over
+   *     a speaker, so it can flip mid-session and bias every range at once.
+   *
+   * Calibration is the right place to check, because it runs in open air where
+   * anything this close to the blast must belong to the device.
+   *
+   * @param {Float32Array} raw an averaged recording of the blast in open air
+   * @returns {{lagSamples, pathMetres, rangeBias, ratio}|null}
+   */
+  /**
+   * Run the secondary-pulse check over several pings and only believe a result
+   * the majority agree on, so a single noise spike can't raise a false alarm.
+   */
+  _detectSecondary(windows, sample = 5) {
+    const hits = [];
+    const tried = Math.min(sample, windows.length);
+    for (let i = 0; i < tried; i++) {
+      const r = this.findSecondaryPulse(windows[i]);
+      if (r) hits.push(r);
+    }
+    if (hits.length * 2 <= tried) return null; // not a majority
+
+    hits.sort((a, b) => a.lagSamples - b.lagSamples);
+    const median = hits[hits.length >> 1];
+    // Require agreement on *where* it is, not just that something was there.
+    const spread = hits[hits.length - 1].lagSamples - hits[0].lagSamples;
+    return spread <= 4 ? median : null;
+  }
+
+  findSecondaryPulse(raw, { minRatio = 0.12, searchSec = 0.0015, skip = 8, tolSec = 0.0015 } = {}) {
+    // Correlate against the ideal chirp, not the installed filter, so the
+    // measurement is independent of whatever reference is currently loaded.
+    const mf = new MatchedFilter(
+      this.chirp, nextPow2(raw.length + this.chirp.length), this.filterOpts);
+    const { re, im } = mf.run(raw);
+    const env = magnitude(re, im, null, 0, raw.length);
+
+    // Only look around where the direct blast is expected. In open air there
+    // should be nothing else nearby, but a wall in view shouldn't get a vote.
+    const tol = Math.round(tolSec * this.sampleRate);
+    const span = Math.ceil(searchSec * this.sampleRate);
+    const from = Math.max(1, this.preGuard - tol);
+    const to = Math.min(env.length - 1, this.preGuard + tol + span);
+    if (to <= from + skip) return null;
+
+    const peak = env[argMax(env, from, to)];
+    if (!(peak > 0)) return null;
+
+    // Collect arrivals, then merge anything within a main-lobe width of its
+    // neighbour so a single pulse's shoulders don't read as several.
+    const clusters = [];
+    for (let i = from; i < to; i++) {
+      if (env[i] < env[i - 1] || env[i] < env[i + 1]) continue;
+      if (env[i] < minRatio * peak) continue;
+      const last = clusters[clusters.length - 1];
+      if (last && i - last.index < skip) {
+        if (env[i] > last.value) { last.index = i; last.value = env[i]; }
+      } else {
+        clusters.push({ index: i, value: env[i] });
+      }
+    }
+    if (clusters.length < 2) return null;
+
+    // The direct blast is the *earliest* arrival, not the loudest. With two
+    // speakers of similar level the loudest is a coin toss, which is exactly
+    // the instability being reported here.
+    const first = clusters[0];
+    let best = null;
+    for (const c of clusters.slice(1)) {
+      if (c.index - first.index > span) break;
+      if (!best || c.value > best.value) best = c;
+    }
+    if (!best) return null;
+
+    const pk = parabolicPeak(env, best.index);
+    const firstPk = parabolicPeak(env, first.index);
+    const path = ((pk.pos - firstPk.pos) / this.sampleRate) * SPEED_OF_SOUND;
+    return {
+      lagSamples: pk.pos - firstPk.pos,
+      pathMetres: path,
+      // If the lock flips between the two, every range shifts by this much.
+      rangeBias: path / 2,
+      ratio: best.value / first.value,
+    };
   }
 
   clearCalibration() {
