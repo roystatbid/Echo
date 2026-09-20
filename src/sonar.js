@@ -1,6 +1,6 @@
 import { nextPow2 } from './fft.js';
 import { BANDS, SPEED_OF_SOUND, makeChirp, rangeResolution } from './chirp.js';
-import { MatchedFilter, magnitude, argMax, parabolicPeak, medianOf } from './dsp.js';
+import { MatchedFilter, magnitude, argMax, parabolicPeak, medianOf, classifyChannels } from './dsp.js';
 import { PingAnalyzer } from './ranging.js';
 
 /**
@@ -20,17 +20,48 @@ class EchoRecorder extends AudioWorkletProcessor {
     this.buf = new Float32Array(this.chunk);
     this.fill = 0;
     this.chunkStart = currentFrame;
+    this.channels = -1;
+    this.stats = { frames: 0, sumA: 0, sumB: 0, sumDiff: 0, sumAB: 0 };
+    this.sinceReport = 0;
   }
   process(inputs) {
     // Re-stamp at each chunk boundary, so a dropped render quantum shows up as
     // a gap in frame numbers instead of silently shifting everything after it.
     if (this.fill === 0) this.chunkStart = currentFrame;
-    const ch = inputs[0] && inputs[0][0];
+    const input = inputs[0];
+    const count = input ? input.length : 0;
+
+    // How many channels the hardware actually delivers. This is ground truth;
+    // getSettings() on iOS often omits channelCount entirely.
+    if (count !== this.channels) {
+      this.channels = count;
+      this.port.postMessage({ type: 'channels', count });
+    }
+
+    // If there really are two, are they two microphones or one upmixed?
+    if (count >= 2) {
+      const a = input[0], b = input[1], s = this.stats;
+      for (let i = 0; i < a.length; i++) {
+        const d = a[i] - b[i];
+        s.sumA += a[i] * a[i];
+        s.sumB += b[i] * b[i];
+        s.sumDiff += d * d;
+        s.sumAB += a[i] * b[i];
+      }
+      s.frames += a.length;
+      this.sinceReport += a.length;
+      if (this.sinceReport >= sampleRate * 0.5) {
+        this.port.postMessage({ type: 'channelStats', count, ...s });
+        this.sinceReport = 0;
+      }
+    }
+
+    const ch = input && input[0];
     const n = ch ? ch.length : 128;
     for (let i = 0; i < n; i++) {
       this.buf[this.fill++] = ch ? ch[i] : 0;
       if (this.fill === this.chunk) {
-        this.port.postMessage({ frame: this.chunkStart, data: this.buf }, [this.buf.buffer]);
+        this.port.postMessage({ type: 'audio', frame: this.chunkStart, data: this.buf }, [this.buf.buffer]);
         this.buf = new Float32Array(this.chunk);
         this.fill = 0;
       }
@@ -106,7 +137,11 @@ export class Sonar {
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
-          channelCount: 1,
+          // Ask for two, take whatever arrives. Ranging only ever uses channel
+          // zero, but if the hardware does expose a second microphone that is
+          // worth knowing: two mics a known distance apart would give real
+          // bearing by interferometry instead of needing the user to turn.
+          channelCount: { ideal: 2 },
         },
       });
     } catch (err) {
@@ -142,7 +177,10 @@ export class Sonar {
       numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
       processorOptions: { chunk: CHUNK },
     });
-    this.recorder.port.onmessage = (e) => this._onAudio(e.data);
+    this.recorder.port.onmessage = (e) => this._onMessage(e.data);
+    this.inputChannels = 0;
+    this.channelStats = null;
+    this.channelInfo = { count: 0, verdict: 'measuring…' };
 
     // Some browsers stop pulling a worklet that isn't wired to the destination.
     this.mute = this.ctx.createGain();
@@ -305,6 +343,25 @@ export class Sonar {
   }
 
   // -------------------------------------------------------------- receive path
+
+  _onMessage(msg) {
+    if (msg.type === 'channels') {
+      this.inputChannels = msg.count;
+      if (msg.count < 2) this.channelStats = null;
+      this._updateChannelInfo();
+      return;
+    }
+    if (msg.type === 'channelStats') {
+      this.channelStats = msg;
+      this._updateChannelInfo();
+      return;
+    }
+    this._onAudio(msg);
+  }
+
+  _updateChannelInfo() {
+    this.channelInfo = classifyChannels(this.channelStats ?? { count: this.inputChannels });
+  }
 
   _onAudio({ frame, data }) {
     if (!this.ring) return;

@@ -71,6 +71,7 @@ export class SimulatedSonar {
     this.simulated = true;
     this.room = ROOM;
     this.outputChannels = 2;
+    this.channelInfo = { count: 0, verdict: 'n/a (simulated)' };
   }
 
   get band() { return BANDS[this.opts.band] ?? BANDS.balanced; }

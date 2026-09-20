@@ -108,6 +108,26 @@ Two subtleties worth knowing if you go digging:
   before the airborne path, and anchoring to that would put a constant bias on
   every reading. The loudest arrival is the one that tracks the acoustic path.
 
+**How many microphones are there, really?** Only one is used for ranging, but
+the answer matters: two microphones a known distance apart would give genuine
+bearing by interferometry, without needing the user to turn at all.
+
+Asking the browser doesn't work. iOS routinely omits `channelCount` from
+`getSettings()`, and a missing value says nothing about the hardware — on a real
+iPad this field comes back empty. So Echo counts the buffers the audio thread
+actually hands over, which is ground truth, and then compares them, because a
+stream reporting two channels is usually one microphone upmixed. Diagnostics
+distinguishes:
+
+| shown | means |
+|---|---|
+| `1` | one channel delivered |
+| `2, duplicated mono` | bit-identical channels — one microphone, upmixed |
+| `2, second channel silent` | a channel exists but carries nothing |
+| `2, distinct (r=0.87)` | two real inputs, correlated as two nearby mics would be |
+
+Only the last is interesting, and Echo says so on screen if it turns up.
+
 **Detection is statistical, not a fixed threshold.** The noise floor varies
 enormously across a single profile — huge just after the blast, tiny at long
 range. Echo uses a smallest-of CFAR: for each range cell, estimate the noise
@@ -167,7 +187,7 @@ it's the most convincing demonstration that any of this is real.
 
 | Setting | What it does |
 |---|---|
-| **Speaker** | Which output channel carries the chirp. Default is a single speaker; see above for why. Calibrate after changing it — the clutter template belongs to the speaker it was measured from, and Echo discards it for you rather than subtracting the wrong signature. |
+| **Speaker** | Which output channel carries the chirp. Default is a single speaker; see above for why. The **⇄** button in the top bar swaps it in one tap, because which physical end of the iPad a channel comes out of depends on the model and on how you're holding it, and trying the other one is faster than reasoning about it. The choice is remembered. Calibrate after settling on one — the clutter template belongs to the speaker it was measured from, and Echo discards it rather than subtracting the wrong signature. |
 | **Chirp band** | *Quiet* (14–21 kHz) is near-ultrasonic and most adults barely hear it — though children and dogs will. *Balanced* (6–20 kHz) is the best all-rounder. *Long* (2–18 kHz) is loud and annoying but reaches furthest. |
 | **Volume** | Louder reaches further, but clipping the microphone destroys the measurement. Watch the clipping indicator. |
 | **Sensitivity** | The CFAR factor from the table above. Lower finds fainter walls and invents more phantoms. |
@@ -199,10 +219,13 @@ it's the most convincing demonstration that any of this is real.
   channel silent while the microphone is live can only be discovered on the
   hardware. Calibrate and check the *second pulse* line in Diagnostics: `none`
   means the routing took, a distance means both speakers are still firing.
-- **iPadOS rotates the stereo image**, so "left" follows the physical left edge
-  as you turn the device. The two speakers sit at slightly different distances
-  from the microphone, so flipping the iPad end-for-end can shift readings by a
-  centimetre or two.
+- **Which end the chirp comes from is not obvious**, and may move when you
+  rotate the iPad, since iPadOS orients the stereo image to match the screen.
+  The two speakers also sit at different distances from the microphone, so a
+  swap shifts readings slightly. Use **⇄** to put the chirp at the end you want,
+  then calibrate. If you find the chirp jumps ends when you rotate the device,
+  that's worth reporting — it can be compensated using the screen orientation,
+  but only once it's confirmed to actually happen.
 
 ## Trying it without a microphone
 
@@ -241,12 +264,12 @@ instead of only being able to observe it on the device.
 npm test
 ```
 
-51 tests, no dependencies. They cover the FFT against a naive DFT, range
+58 tests, no dependencies. They cover the FFT against a naive DFT, range
 accuracy to within 1.5 cm across 0.4 m to 4.8 m, separating two walls one
 resolution cell apart, sidelobe level, CFAR false-alarm rate, clutter
 suppression, behaviour when the output level changes mid-session, the
-stereo-speaker failure modes above, and the orientation maths across device
-poses.
+stereo-speaker failure modes above, microphone-channel classification, and the
+orientation maths across device poses.
 
 The orientation tests are worth a particular mention: the bearing calculation
 blends "up the screen" with "out the back of the slab" according to how the iPad

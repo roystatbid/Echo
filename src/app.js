@@ -36,6 +36,7 @@ let nearest = null;          // { range, bearing, snrDb, at }
 let pingTimes = [];
 let lastStatus = { message: 'starting…' };
 let lastProfile = null;
+let announcedMics = false;
 let wakeLock = null;
 
 // ------------------------------------------------------------------ settings
@@ -142,6 +143,13 @@ function onProfile(profile) {
   }
 
   lastProfile = profile;
+
+  // Worth surfacing rather than leaving buried in Diagnostics: two genuinely
+  // different microphones would make real bearing possible without turning.
+  if (!announcedMics && sonar?.channelInfo?.verdict === 'distinct') {
+    announcedMics = true;
+    toast('Two distinct microphone channels detected — see Diagnostics');
+  }
 }
 
 function onStatus(s) {
@@ -205,6 +213,23 @@ function updateHint() {
   if (ui.hint.textContent !== msg) ui.hint.textContent = msg;
 }
 
+/**
+ * What the audio thread actually delivered, which is the only trustworthy
+ * answer: iOS routinely omits channelCount from getSettings(), and a missing
+ * value says nothing at all about the hardware.
+ */
+function micChannels() {
+  if (sonar?.simulated) return 'n/a (simulated)';
+  const info = sonar?.channelInfo;
+  if (!info || !info.count) return info?.verdict ?? '—';
+  if (info.count === 1) return '1';
+  if (info.verdict === 'distinct') {
+    const c = info.correlation ?? 0;
+    return `2, distinct (r=${c.toFixed(2)})`;
+  }
+  return `${info.count}, ${info.verdict}`;
+}
+
 /** Renders a getUserMedia constraint that we asked to be off. */
 function flag(v) {
   if (v === undefined || v === null) return 'not reported';
@@ -232,7 +257,7 @@ function updateDiagnostics() {
     ['second pulse', sonar?.lastCalibration?.secondaryPulse
       ? `${(sonar.lastCalibration.secondaryPulse.pathMetres * 100).toFixed(0)} cm`
       : (sonar?.lastCalibration ? 'none' : '—')],
-    ['mic channels', ts.channelCount ?? '—'],
+    ['mic channels', micChannels()],
     // iOS is asked to turn these off; whether it did can only be seen here.
     ['echo cancel', flag(ts.echoCancellation)],
     ['auto gain', flag(ts.autoGainControl)],
@@ -271,6 +296,20 @@ $('btn-ahead').addEventListener('click', () => {
   heading?.zero();
   radar?.clear();
   toast('This direction is now straight ahead');
+});
+
+// Which physical end of the iPad a channel comes out of depends on the model
+// and on how it is being held, so the only reliable way to pick is to try the
+// other one. That deserves to be one tap, not a trip into Settings.
+$('btn-swap').addEventListener('click', () => {
+  const next = settings.speaker === 'right' ? 'left' : 'right';
+  applySetting('speaker', next);
+  radar?.clear();
+  scope?.clear();
+  const sel = $('opt-speaker');
+  if (sel) sel.value = next;
+  if (ui.speakerHint) ui.speakerHint.textContent = SPEAKERS[next].hint;
+  toast(`${SPEAKERS[next].label} — recalibrate once you've settled on one`);
 });
 
 $('btn-clear').addEventListener('click', () => {
@@ -390,7 +429,7 @@ const DISPLAY_ONLY = new Set(['gateDb', 'dynDb', 'tvg', 'beamWidth', 'units']);
 function applySetting(key, value, persist = true) {
   settings[key] = value;
   if (!DISPLAY_ONLY.has(key)) sonar?.set(key, value);
-  if (key === 'maxRange' || key === 'band') { radar?.clear(); scope?.clear(); }
+  if (['maxRange', 'band', 'speaker'].includes(key)) { radar?.clear(); scope?.clear(); }
   if (persist) saveSettings();
 }
 

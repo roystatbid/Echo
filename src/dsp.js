@@ -248,3 +248,43 @@ export function phaseShift(re, im, fracSamples, centreFreq, sampleRate) {
 export function toDb(v, floor = 1e-12) {
   return 20 * Math.log10(Math.max(v, floor));
 }
+
+/**
+ * Work out what a multi-channel input actually is, from energy statistics
+ * gathered in the audio worklet.
+ *
+ * Asking the browser is unreliable — iOS omits most of `getSettings()`, so a
+ * missing `channelCount` says nothing about the hardware. Counting the buffers
+ * the audio thread hands over is ground truth, and comparing them separates the
+ * case that matters (two genuinely different microphones, which would give real
+ * bearing by interferometry) from the case that looks identical in the
+ * settings object (one microphone upmixed to two channels).
+ *
+ * @param {{count, frames, sumA, sumB, sumDiff, sumAB}} s
+ */
+export function classifyChannels(s) {
+  if (!s || !s.count) return { count: 0, verdict: 'no input' };
+  if (s.count === 1) return { count: 1, verdict: 'single channel' };
+  if (!s.frames) return { count: s.count, verdict: 'measuring…' };
+
+  const rmsA = Math.sqrt(s.sumA / s.frames);
+  const rmsB = Math.sqrt(s.sumB / s.frames);
+  const rmsDiff = Math.sqrt(s.sumDiff / s.frames);
+  const ref = Math.max(rmsA, rmsB);
+  const out = { count: s.count, rmsA, rmsB, rmsDiff };
+
+  if (ref < 1e-7) return { ...out, verdict: 'silent' };
+  if (rmsB < ref * 1e-3) return { ...out, verdict: 'second channel silent' };
+  // Bit-identical channels are an upmix, not two microphones.
+  if (rmsDiff < ref * 1e-4) return { ...out, verdict: 'duplicated mono' };
+
+  const denom = Math.sqrt(s.sumA * s.sumB);
+  return {
+    ...out,
+    verdict: 'distinct',
+    correlation: denom > 0 ? s.sumAB / denom : 0,
+    // How far the channels differ. Two mics a few centimetres apart hearing the
+    // same room are highly correlated but not identical, so this lands low.
+    separationDb: 20 * Math.log10(ref / rmsDiff),
+  };
+}
