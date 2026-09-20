@@ -113,7 +113,7 @@ export class PingAnalyzer {
     }
 
     let cancelled = false;
-    if (cancel && this.clutter && this.clutter.re.length >= profLen) {
+    if (cancel && this.clutter) {
       this._subtractClutter(pRe, pIm, profLen, direct);
       cancelled = true;
     }
@@ -149,8 +149,13 @@ export class PingAnalyzer {
 
   _subtractClutter(pRe, pIm, profLen, direct) {
     const c = this.clutter;
-    const tRe = c.re.slice(0, profLen);
-    const tIm = c.im.slice(0, profLen);
+    // A template captured at a different max range may be shorter or longer
+    // than the current profile. Subtracting over the overlap is correct either
+    // way: the device's own signature is a near-field effect that has died out
+    // long before the far end of the profile.
+    const n = Math.min(profLen, c.re.length);
+    const tRe = c.re.slice(0, n);
+    const tIm = c.im.slice(0, n);
 
     // Align to this ping's sub-sample phase. Without this the residue of an
     // imperfectly cancelled blast sits right where the nearest walls show up.
@@ -159,10 +164,24 @@ export class PingAnalyzer {
 
     // Rescale to this ping's blast so a volume change doesn't leave a crater.
     const scale = c.directAmp > 0 ? direct.val / c.directAmp : 1;
-    for (let i = 0; i < profLen; i++) {
+    for (let i = 0; i < n; i++) {
       pRe[i] -= scale * tRe[i];
       pIm[i] -= scale * tIm[i];
     }
+  }
+
+  /**
+   * Carry a calibration across a rebuild. Valid only when the transmit pulse is
+   * unchanged, since both products are tied to the waveform they were measured
+   * with.
+   */
+  adoptCalibration(prev) {
+    if (!prev) return;
+    if (prev.capturedReference) {
+      this.filter.setReference(prev.capturedReference, this.filterOpts);
+      this.capturedReference = prev.capturedReference;
+    }
+    if (prev.clutter) this.clutter = prev.clutter;
   }
 
   /**

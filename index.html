@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Echo — acoustic echolocation</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="description" content="Measures how far away walls are using the iPad's own speaker and microphone.">
+<meta name="theme-color" content="#04100d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Echo">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="splash" class="splash">
+  <div class="splash-inner">
+    <h1>Echo</h1>
+    <p class="tagline">Sonar, using nothing but the speaker and microphone you already have.</p>
+    <ol class="how">
+      <li>The iPad chirps. The chirp bounces off whatever is in front of it.</li>
+      <li>The microphone hears the echo a few milliseconds later. Distance is just the speed of sound times half that delay.</li>
+      <li>There is only one microphone, so it can't tell <em>which way</em> an echo came from. Turning slowly on the spot is what paints the room: the motion sensors supply the bearing.</li>
+    </ol>
+    <button id="btn-start" class="primary">Start</button>
+    <button id="btn-demo" class="ghost">Try the simulator instead</button>
+    <p class="fineprint">
+      Needs microphone and motion access. Turn the volume up, and take headphones out.
+      Nothing is recorded or sent anywhere — audio never leaves the device.
+    </p>
+    <p id="splash-error" class="error" hidden></p>
+  </div>
+</div>
+
+<div id="app" class="app" hidden>
+  <header class="bar">
+    <div class="brand">Echo</div>
+    <div id="status" class="status">starting…</div>
+    <div class="bar-actions">
+      <button id="btn-ahead" class="chip" title="Call the current direction straight ahead">Set ahead</button>
+      <button id="btn-calibrate" class="chip">Calibrate</button>
+      <button id="btn-clear" class="chip">Clear</button>
+      <button id="btn-settings" class="chip icon" aria-label="Settings">⚙</button>
+      <button id="btn-stop" class="chip danger">Stop</button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <section id="view-radar" class="view">
+      <div class="radar-wrap">
+        <canvas id="radar"></canvas>
+        <div class="readout">
+          <div class="readout-label">nearest</div>
+          <div id="range-big" class="readout-value">—</div>
+          <div id="range-sub" class="readout-sub"></div>
+        </div>
+        <div id="hint" class="hint"></div>
+      </div>
+    </section>
+
+    <section id="view-scope" class="view" hidden>
+      <canvas id="scope"></canvas>
+      <p class="caption">
+        Echo strength against distance for the latest ping. Amber is the detection
+        threshold — a return only counts as a wall where the green trace rises above it.
+        The red band is the blind zone, where the speaker is still ringing.
+      </p>
+    </section>
+  </main>
+
+  <nav class="tabs">
+    <button class="tab active" data-view="radar">Radar</button>
+    <button class="tab" data-view="scope">Signal</button>
+  </nav>
+
+  <aside id="settings" class="settings" hidden>
+    <div class="settings-head">
+      <h2>Settings</h2>
+      <button id="btn-close-settings" class="chip">Done</button>
+    </div>
+    <div class="settings-body">
+
+      <label class="row">
+        <span>Chirp band</span>
+        <select id="opt-band"></select>
+      </label>
+      <p id="band-hint" class="note"></p>
+
+      <label class="row">
+        <span>Max range</span>
+        <span class="ctl"><input id="opt-maxRange" type="range" min="1" max="10" step="0.5"><output id="out-maxRange"></output></span>
+      </label>
+
+      <label class="row">
+        <span>Pings per second</span>
+        <span class="ctl"><input id="opt-pingRate" type="range" min="2" max="20" step="1"><output id="out-pingRate"></output></span>
+      </label>
+
+      <label class="row">
+        <span>Volume</span>
+        <span class="ctl"><input id="opt-volume" type="range" min="0.05" max="1" step="0.05"><output id="out-volume"></output></span>
+      </label>
+      <p class="note">Louder reaches further, but clipping the microphone ruins the measurement. Watch the input meter.</p>
+
+      <label class="row">
+        <span>Sensitivity</span>
+        <span class="ctl"><input id="opt-cfarScale" type="range" min="3" max="7" step="0.25"><output id="out-cfarScale"></output></span>
+      </label>
+      <p class="note">How far above the local noise a return must rise to count. Lower finds fainter walls and invents more phantoms.</p>
+
+      <label class="row">
+        <span>Display gate</span>
+        <span class="ctl"><input id="opt-gateDb" type="range" min="4" max="30" step="1"><output id="out-gateDb"></output></span>
+      </label>
+
+      <label class="row">
+        <span>Beam width</span>
+        <span class="ctl"><input id="opt-beamWidth" type="range" min="10" max="120" step="5"><output id="out-beamWidth"></output></span>
+      </label>
+      <p class="note">How wide each ping is painted on the dial. This is an assumption about the speaker, not a measurement — the sensor has no angular resolution of its own.</p>
+
+      <label class="row">
+        <span>Blind zone</span>
+        <span class="ctl"><input id="opt-blindRange" type="range" min="0.1" max="1" step="0.05"><output id="out-blindRange"></output></span>
+      </label>
+
+      <label class="row">
+        <span>Speaker↔mic spacing</span>
+        <span class="ctl"><input id="opt-speakerMic" type="range" min="0" max="0.4" step="0.01"><output id="out-speakerMic"></output></span>
+      </label>
+      <p class="note">The gap between the speaker and microphone on your iPad. Getting this right removes a constant bias from every distance.</p>
+
+      <label class="row inline">
+        <span>Cancel direct blast</span>
+        <input id="opt-cancelDirect" type="checkbox">
+      </label>
+      <p class="note">Subtracts the device's own sound, learned during calibration. Needed to see anything closer than about a metre.</p>
+
+      <label class="row inline">
+        <span>Show distances in feet</span>
+        <input id="opt-units" type="checkbox">
+      </label>
+
+      <div class="diag">
+        <h3>Diagnostics</h3>
+        <dl id="diagnostics"></dl>
+      </div>
+
+      <button id="btn-reset" class="ghost wide">Reset to defaults</button>
+    </div>
+  </aside>
+
+  <div id="toast" class="toast" hidden></div>
+</div>
+
+<script type="module" src="src/app.js"></script>
+</body>
+</html>

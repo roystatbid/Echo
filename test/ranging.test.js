@@ -191,3 +191,47 @@ test('range axis covers exactly what was asked for', () => {
   const last = analyzer.binToRange(analyzer.profSamples - 1);
   assert.ok(last >= 4 && last - 4 < 0.01, `last bin is ${last.toFixed(3)} m, wanted 4`);
 });
+
+test('a calibration survives a change of max range', () => {
+  // Changing the range scale rebuilds the analyzer. Losing the clutter template
+  // there would silently un-blind the near field without telling anyone.
+  const { chirp, analyzer } = build({ maxRange: 6 });
+  const room = new Room({ sampleRate: SR, chirp, walls: [], ringAmp: 0.12 });
+  calibrate(analyzer, room, 24);
+
+  const wider = new PingAnalyzer({
+    sampleRate: SR, chirp, f0: BAND.f0, f1: BAND.f1,
+    maxRange: 9, speakerMic: 0.15, blindRange: 0.25,
+  });
+  wider.adoptCalibration(analyzer);
+  assert.ok(wider.clutter, 'template should carry over');
+  assert.ok(wider.capturedReference, 'reference should carry over');
+
+  // The template is now shorter than the profile; it must still subtract over
+  // the near field, which is the only place clutter lives.
+  const empty = room.record(wider.windowLength, wider.preGuard, { walls: [] });
+  const raw = analyzer.analyze(
+    room.record(analyzer.windowLength, analyzer.preGuard, { walls: [] }), { cancel: false });
+  const cleaned = wider.analyze(empty, { cancel: true });
+  assert.ok(cleaned.cancelled, 'should still be cancelling');
+
+  const at = (prof, m) => prof.strength[Math.round(SR * (2 * m - 0.15) / 343)];
+  assert.ok(at(raw, 0.4) / at(cleaned, 0.4) > 8, 'near-field clutter should still be removed');
+});
+
+test('a wall is still measured correctly after the range scale changes', () => {
+  const { chirp, analyzer } = build({ maxRange: 6 });
+  const room = new Room({ sampleRate: SR, chirp, walls: [2.2], ringAmp: 0.12 });
+  calibrate(analyzer, room, 24);
+
+  const wider = new PingAnalyzer({
+    sampleRate: SR, chirp, f0: BAND.f0, f1: BAND.f1,
+    maxRange: 9, speakerMic: 0.15, blindRange: 0.25,
+  });
+  wider.adoptCalibration(analyzer);
+
+  const p = wider.analyze(room.record(wider.windowLength, wider.preGuard), { cancel: true });
+  assert.ok(!p.error, p.error);
+  const hit = nearest(p, 2.2);
+  assert.ok(Math.abs(hit.range - 2.2) < 0.03, `got ${hit.range.toFixed(3)} m`);
+});

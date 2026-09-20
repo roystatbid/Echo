@@ -183,12 +183,12 @@ export class Sonar {
     if (['band', 'chirpMs', 'maxRange', 'speakerMic', 'blindRange'].includes(key)) {
       const rebuildPulse = ['band', 'chirpMs'].includes(key);
       this._buildWaveform();
-      if (rebuildPulse && wasCalibrated) {
-        // The calibration was measured with the old pulse; it can't subtract
-        // from profiles made with a new one.
-        this._status('Pulse changed — recalibrate for best results');
-      }
       if (rebuildPulse) {
+        if (wasCalibrated) {
+          // The calibration was measured with the old pulse and cannot subtract
+          // from profiles made with a new one.
+          this._status('Pulse changed — recalibrate for best results');
+        }
         this.latency = null;
         this.state = 'locking';
       }
@@ -199,9 +199,17 @@ export class Sonar {
 
   // ------------------------------------------------------------- transmit path
 
+  /** Identifies the transmit pulse; calibration is only valid for one of these. */
+  get _pulseSignature() {
+    return `${this.opts.band}/${this.opts.chirpMs}`;
+  }
+
   _buildWaveform() {
     const sr = this.sampleRate;
     const b = this.band;
+    const previous = this.analyzer;
+    const samePulse = this._builtSignature === this._pulseSignature;
+
     this.chirp = makeChirp({
       sampleRate: sr, f0: b.f0, f1: b.f1,
       duration: this.opts.chirpMs / 1000, taper: 0.3,
@@ -223,6 +231,12 @@ export class Sonar {
     this.mfLock = new MatchedFilter(
       this.chirp, nextPow2(this.lockWindow + this.chirp.length),
       { sampleRate: sr, mode: 'window', f0: b.f0, f1: b.f1 });
+
+    // Changing the max range or the speaker spacing rebuilds the analyzer but
+    // leaves the transmit pulse alone, so a calibration taken earlier is still
+    // valid and shouldn't be silently thrown away.
+    if (samePulse) this.analyzer.adoptCalibration(previous);
+    this._builtSignature = this._pulseSignature;
   }
 
   _schedule(time) {
