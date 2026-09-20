@@ -1,7 +1,7 @@
 import { nextPow2 } from './fft.js';
 import { BANDS, SPEED_OF_SOUND, makeChirp, rangeResolution } from './chirp.js';
 import { MatchedFilter, magnitude, argMax, parabolicPeak, medianOf, classifyChannels } from './dsp.js';
-import { PingAnalyzer } from './ranging.js';
+import { PingAnalyzer, MIN_DIRECT_LEVEL } from './ranging.js';
 
 /**
  * The recorder runs in an AudioWorklet so capture is stamped with the audio
@@ -72,6 +72,44 @@ class EchoRecorder extends AudioWorkletProcessor {
 registerProcessor('echo-recorder', EchoRecorder);
 `;
 
+/**
+ * Capture constraints. Every one of these is load-bearing: iOS defaults to a
+ * voice-processing chain whose echo canceller exists precisely to remove what
+ * we are trying to measure, and whose AGC would undo any attempt to compare
+ * echo strength between pings.
+ *
+ * Two channels are requested and whatever arrives is used; ranging only ever
+ * reads channel zero. On the iPads tested this comes back as a stereo container
+ * with a silent second channel, which is worth knowing rather than assuming.
+ */
+export function micConstraints(deviceId) {
+  const audio = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    channelCount: { ideal: 2 },
+  };
+  if (deviceId) audio.deviceId = { exact: deviceId };
+  return audio;
+}
+
+/**
+ * Audio inputs the browser will admit to. Only meaningful after permission has
+ * been granted; before that, labels are blank and some browsers report a single
+ * placeholder device.
+ */
+export async function listMicrophones() {
+  if (!navigator.mediaDevices?.enumerateDevices) return [];
+  try {
+    const all = await navigator.mediaDevices.enumerateDevices();
+    return all
+      .filter((d) => d.kind === 'audioinput')
+      .map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Microphone ${i + 1}` }));
+  } catch {
+    return [];
+  }
+}
+
 const RING_SECONDS = 4;
 const CHUNK = 1024;
 const LOCK_SPAN_SEC = 0.35;
@@ -128,22 +166,8 @@ export class Sonar {
     this._status('Requesting microphone…');
 
     try {
-      // Every one of these constraints is load-bearing. iOS defaults to a
-      // voice-processing chain whose echo canceller exists precisely to remove
-      // what we are trying to measure, and whose AGC would undo any attempt to
-      // compare echo strength between pings.
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          // Ask for two, take whatever arrives. Ranging only ever uses channel
-          // zero, but if the hardware does expose a second microphone that is
-          // worth knowing: two mics a known distance apart would give real
-          // bearing by interferometry instead of needing the user to turn.
-          channelCount: { ideal: 2 },
-        },
-      });
+      this.stream = await navigator.mediaDevices.getUserMedia(
+        { audio: micConstraints(this.opts.micDeviceId) });
     } catch (err) {
       this.state = 'error';
       this.lastError = err;
@@ -158,6 +182,9 @@ export class Sonar {
     // Record what the browser actually granted; iOS quietly ignores some of it.
     const track = this.stream.getAudioTracks()[0];
     this.trackSettings = track?.getSettings?.() ?? {};
+
+    // Labels are only populated after permission, so this has to happen here.
+    this.microphones = await listMicrophones();
 
     const url = URL.createObjectURL(new Blob([RECORDER_WORKLET], { type: 'application/javascript' }));
     try {
@@ -212,6 +239,41 @@ export class Sonar {
     this.state = 'idle';
     this.latency = null;
     this._status('Stopped');
+  }
+
+  /**
+   * Swap to a different audio input without tearing the whole engine down.
+   *
+   * The microphone's position is part of the measurement geometry, so this
+   * invalidates the calibration and the latency lock: a different mic sits a
+   * different distance from the speaker, which moves the direct blast and with
+   * it the time origin.
+   */
+  async switchMicrophone(deviceId) {
+    this.opts.micDeviceId = deviceId || null;
+    if (!this.ctx) return;
+
+    const next = await navigator.mediaDevices.getUserMedia(
+      { audio: micConstraints(this.opts.micDeviceId) });
+
+    try { this.source?.disconnect(); } catch {}
+    try { this.stream?.getTracks().forEach((t) => t.stop()); } catch {}
+
+    this.stream = next;
+    this.trackSettings = next.getAudioTracks()[0]?.getSettings?.() ?? {};
+    this.source = this.ctx.createMediaStreamSource(next);
+    this.source.connect(this.recorder);
+
+    // Everything downstream of the old microphone is now wrong.
+    this.analyzer?.clearCalibration();
+    this.channelStats = null;
+    this.channelInfo = { count: 0, verdict: 'measuring…' };
+    this.ringStarted = false;
+    this.pending = [];
+    this.latency = null;
+    this.state = 'locking';
+    this.nextTxTime = this.ctx.currentTime + 0.2;
+    this._status('Microphone changed — re-locking');
   }
 
   /** Change a setting live. Some of them mean rebuilding the transmit pulse. */
@@ -426,7 +488,7 @@ export class Sonar {
 
     const profile = a.analyze(rx, { cancel: this.opts.cancelDirect });
     if (profile.error) {
-      if (profile.error === 'no direct pulse') {
+      if (profile.error === 'no direct pulse' || profile.error === 'pulse too faint') {
         // Route change, volume down, or a hand over the speaker.
         this.latency = null;
         this.state = 'locking';
@@ -459,8 +521,24 @@ export class Sonar {
     const noise = medianOf(env, 0, length);
     const pk = parabolicPeak(env, idx);
 
+    // The absolute check has to come first. With a silent input the noise
+    // estimate tends to zero, so the relative test passes trivially and the
+    // engine locks onto numerical grass, then reports a confident latency for
+    // a pulse it never heard.
+    let level = 0;
+    for (let i = 0; i < length; i++) level += rx[i] * rx[i];
+    level = Math.sqrt(level / length);
+
+    if (level < 1e-4) {
+      this._status('No sound reaching the microphone — check it isn’t muted or in use elsewhere.');
+      return 'drop';
+    }
+    if (pk.val < MIN_DIRECT_LEVEL) {
+      this._status('Can’t hear the chirp — turn the volume up and unplug headphones.');
+      return 'drop';
+    }
     if (pk.val < 8 * noise || idx < 2 || idx > length - 4) {
-      this._status('Searching for the direct pulse — is the volume up?');
+      this._status('Searching for the direct pulse…');
       return 'drop';
     }
     this.latency = idx;

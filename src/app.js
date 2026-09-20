@@ -22,7 +22,8 @@ const ui = {
   radar: $('radar'), scope: $('scope'),
   rangeBig: $('range-big'), rangeSub: $('range-sub'), hint: $('hint'),
   settings: $('settings'), diagnostics: $('diagnostics'), toast: $('toast'),
-  bandHint: $('band-hint'), speakerHint: $('speaker-hint'), splashError: $('splash-error'),
+  bandHint: $('band-hint'), speakerHint: $('speaker-hint'),
+  micRow: $('row-mic'), micHint: $('mic-hint'), splashError: $('splash-error'),
 };
 
 const settings = loadSettings();
@@ -258,6 +259,7 @@ function updateDiagnostics() {
       ? `${(sonar.lastCalibration.secondaryPulse.pathMetres * 100).toFixed(0)} cm`
       : (sonar?.lastCalibration ? 'none' : '—')],
     ['mic channels', micChannels()],
+    ['audio inputs', sonar?.simulated ? 'n/a (simulated)' : (sonar?.microphones?.length ?? '—')],
     // iOS is asked to turn these off; whether it did can only be seen here.
     ['echo cancel', flag(ts.echoCancellation)],
     ['auto gain', flag(ts.autoGainControl)],
@@ -389,6 +391,34 @@ function buildSettingsPanel() {
     applySetting('band', bandSel.value);
     ui.bandHint.textContent = BANDS[bandSel.value].hint;
   };
+
+  // Only worth showing if the platform actually offers a choice. iOS often
+  // reports a single generic input even on hardware with several microphones.
+  const mics = sonar?.microphones ?? [];
+  if (mics.length > 1) {
+    const micSel = $('opt-mic');
+    micSel.innerHTML = mics
+      .map((m) => `<option value="${m.deviceId}">${m.label}</option>`)
+      .join('');
+    micSel.value = settings.micDeviceId || mics[0].deviceId;
+    ui.micRow.hidden = false;
+    ui.micHint.hidden = false;
+    ui.micHint.textContent =
+      'The microphone is part of the geometry — a different one sits a different '
+      + 'distance from the speaker. Switching drops the calibration and re-locks.';
+    micSel.onchange = async () => {
+      settings.micDeviceId = micSel.value;
+      saveSettings();
+      try {
+        await sonar.switchMicrophone(micSel.value);
+        radar?.clear();
+        scope?.clear();
+        toast('Microphone changed — recalibrate');
+      } catch (err) {
+        toast(`Couldn’t switch microphone: ${err.message}`);
+      }
+    };
+  }
 
   const spkSel = $('opt-speaker');
   spkSel.innerHTML = Object.entries(SPEAKERS)

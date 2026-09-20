@@ -87,3 +87,25 @@ test('a small gain difference alone is not two microphones', () => {
 test('statistics that have not arrived yet say so', () => {
   assert.equal(classifyChannels({ count: 2, frames: 0 }).verdict, 'measuring…');
 });
+
+// --- capture constraints -----------------------------------------------------
+
+import { micConstraints } from '../src/sonar.js';
+
+test('capture constraints disable everything that would corrupt the measurement', () => {
+  const c = micConstraints();
+  // iOS's voice chain exists to remove exactly the signal we are measuring.
+  assert.equal(c.echoCancellation, false);
+  assert.equal(c.autoGainControl, false);
+  assert.equal(c.noiseSuppression, false);
+  assert.deepEqual(c.channelCount, { ideal: 2 });
+  assert.ok(!('deviceId' in c), 'no device pinned unless one was chosen');
+});
+
+test('a chosen microphone is requested exactly', () => {
+  const c = micConstraints('abc123');
+  assert.deepEqual(c.deviceId, { exact: 'abc123' });
+  // and the rest must survive the addition
+  assert.equal(c.echoCancellation, false);
+  assert.equal(c.autoGainControl, false);
+});

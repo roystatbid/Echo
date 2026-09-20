@@ -155,12 +155,15 @@ test('calibration keeps the range scale honest', () => {
   assert.ok(Math.abs(hit.range - 3.0) < 0.02, `got ${hit.range.toFixed(3)} m`);
 });
 
-test('reports no direct pulse when the speaker is silent', () => {
-  const { chirp, analyzer } = build();
+test('reports a refusal when the speaker is silent', () => {
+  // Room noise with no ping in it. Which refusal it is depends on how loud the
+  // room is; what matters is that it never returns a measurement.
+  const { analyzer } = build();
   const rx = new Float32Array(analyzer.windowLength);
   for (let i = 0; i < rx.length; i++) rx[i] = 0.001 * (Math.random() * 2 - 1);
   const p = analyzer.analyze(rx);
-  assert.equal(p.error, 'no direct pulse');
+  assert.ok(['pulse too faint', 'no direct pulse'].includes(p.error),
+    `unexpected result: ${JSON.stringify(p.error ?? p.peaks)}`);
 });
 
 test('flags a clipping input', () => {
@@ -234,4 +237,33 @@ test('a wall is still measured correctly after the range scale changes', () => {
   assert.ok(!p.error, p.error);
   const hit = nearest(p, 2.2);
   assert.ok(Math.abs(hit.range - 2.2) < 0.03, `got ${hit.range.toFixed(3)} m`);
+});
+
+test('a silent input is refused rather than locked onto', () => {
+  // The relative SNR test alone is not enough: with no signal the noise
+  // estimate collapses towards zero and any ripple clears it. A muted device
+  // must say so, not report a confident measurement of nothing.
+  const { analyzer } = build();
+  const rx = new Float32Array(analyzer.windowLength); // digital silence
+  assert.equal(analyzer.analyze(rx).error, 'pulse too faint');
+});
+
+test('a near-silent input is refused too', () => {
+  const { analyzer } = build();
+  const rx = new Float32Array(analyzer.windowLength);
+  for (let i = 0; i < rx.length; i++) rx[i] = 1e-6 * (Math.random() * 2 - 1);
+  const p = analyzer.analyze(rx);
+  assert.ok(p.error, `expected a refusal, got peaks: ${JSON.stringify(p.peaks?.map(q => +q.range.toFixed(2)))}`);
+});
+
+test('a genuinely quiet but real ping is still accepted', () => {
+  // The floor must not be so high that it rejects a usable signal from a
+  // device held at low volume.
+  const { chirp, analyzer } = build();
+  const room = new Room({ sampleRate: SR, chirp, walls: [2.0], noise: 0.00002 });
+  const rx = room.record(analyzer.windowLength, analyzer.preGuard, { gain: 0.02 });
+  const p = analyzer.analyze(rx, { cancel: false });
+  assert.ok(!p.error, `rejected a real ping: ${p.error}`);
+  const hit = nearest(p, 2.0);
+  assert.ok(Math.abs(hit.range - 2.0) < 0.03, `got ${hit.range.toFixed(3)} m`);
 });

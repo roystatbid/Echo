@@ -1,5 +1,13 @@
 import { nextPow2 } from './fft.js';
 import { SPEED_OF_SOUND } from './chirp.js';
+
+/**
+ * Smallest compressed direct blast we will believe, as a fraction of full
+ * scale. The filter is normalised so a received copy of amplitude `a` peaks at
+ * `a`, so this is about -54 dBFS: far below any usable ping, far above the
+ * numerical grass of a silent input.
+ */
+export const MIN_DIRECT_LEVEL = 0.002;
 import {
   MatchedFilter, magnitude, argMax, parabolicPeak,
   cfarThreshold, detectPeaks, medianOf, phaseShift, toDb,
@@ -85,10 +93,10 @@ export class PingAnalyzer {
 
   /**
    * @param {Float32Array} rx window of recorded audio, windowLength long
-   * @param {{cancel?: boolean, minDirectSnr?: number}} opts
+   * @param {{cancel?: boolean, minDirectSnr?: number, minDirectLevel?: number}} opts
    * @returns {object|{error: string}} a range profile, or why there isn't one
    */
-  analyze(rx, { cancel = true, minDirectSnr = 6 } = {}) {
+  analyze(rx, { cancel = true, minDirectSnr = 6, minDirectLevel = MIN_DIRECT_LEVEL } = {}) {
     const sr = this.sampleRate;
     const length = Math.min(rx.length, this.windowLength);
 
@@ -102,6 +110,11 @@ export class PingAnalyzer {
     const { re, im } = this.filter.run(rx);
     const direct = this.locateDirect(re, im, length);
     if (!direct) return { error: 'window too short' };
+    // An absolute floor as well as a relative one. In a silent room the noise
+    // estimate collapses towards zero, and *any* ripple clears a purely
+    // relative threshold — which is how a muted device ends up confidently
+    // reporting a lock and then measuring nothing at all.
+    if (direct.val < minDirectLevel) return { error: 'pulse too faint' };
     if (direct.val < minDirectSnr * direct.noise) return { error: 'no direct pulse' };
 
     const profLen = Math.min(this.profSamples, length - direct.idx);

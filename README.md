@@ -128,6 +128,27 @@ distinguishes:
 
 Only the last is interesting, and Echo says so on screen if it turns up.
 
+On the iPad this was developed against, the answer came back
+`2, second channel silent` — iOS hands over a stereo container with nothing in
+the right-hand channel. So there is one usable microphone, and interferometric
+bearing is off the table; the gyroscope sweep stays the only source of
+direction. Some iPads expose several microphones as separate *devices* rather
+than as channels, so Diagnostics also reports how many audio inputs exist, and
+a picker appears in Settings when there is more than one. The microphone is
+part of the measurement geometry — a different one sits a different distance
+from the speaker — so switching drops the calibration and re-locks.
+
+**A silent room must not look like a lock.** The direct blast is found by
+requiring it to stand a good margin above the surrounding noise. That test is
+worthless on its own: with the volume down, or the microphone muted, or the
+audio routed elsewhere, the noise estimate collapses towards zero and *any*
+numerical ripple clears a purely relative threshold. The engine then announces
+a confident lock and a plausible-looking latency for a pulse it never heard,
+which is a far worse failure than saying nothing. There is an absolute floor as
+well, about -54 dBFS on the compressed peak, and a separate check on input
+level so "nothing is reaching the microphone" and "I can't hear the chirp" are
+different messages.
+
 **Detection is statistical, not a fixed threshold.** The noise floor varies
 enormously across a single profile — huge just after the blast, tiny at long
 range. Echo uses a smallest-of CFAR: for each range cell, estimate the noise
@@ -187,6 +208,7 @@ it's the most convincing demonstration that any of this is real.
 
 | Setting | What it does |
 |---|---|
+| **Microphone** | Only shown when the platform offers more than one audio input. Switching invalidates the calibration, since the microphone's position is part of the geometry. |
 | **Speaker** | Which output channel carries the chirp. Default is a single speaker; see above for why. The **⇄** button in the top bar swaps it in one tap, because which physical end of the iPad a channel comes out of depends on the model and on how you're holding it, and trying the other one is faster than reasoning about it. The choice is remembered. Calibrate after settling on one — the clutter template belongs to the speaker it was measured from, and Echo discards it rather than subtracting the wrong signature. |
 | **Chirp band** | *Quiet* (14–21 kHz) is near-ultrasonic and most adults barely hear it — though children and dogs will. *Balanced* (6–20 kHz) is the best all-rounder. *Long* (2–18 kHz) is loud and annoying but reaches furthest. |
 | **Volume** | Louder reaches further, but clipping the microphone destroys the measurement. Watch the clipping indicator. |
@@ -264,12 +286,12 @@ instead of only being able to observe it on the device.
 npm test
 ```
 
-58 tests, no dependencies. They cover the FFT against a naive DFT, range
+63 tests, no dependencies. They cover the FFT against a naive DFT, range
 accuracy to within 1.5 cm across 0.4 m to 4.8 m, separating two walls one
 resolution cell apart, sidelobe level, CFAR false-alarm rate, clutter
 suppression, behaviour when the output level changes mid-session, the
-stereo-speaker failure modes above, microphone-channel classification, and the
-orientation maths across device poses.
+stereo-speaker failure modes above, microphone-channel classification, refusal
+to lock onto silence, and the orientation maths across device poses.
 
 The orientation tests are worth a particular mention: the bearing calculation
 blends "up the screen" with "out the back of the slab" according to how the iPad
