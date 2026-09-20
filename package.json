@@ -1,0 +1,12 @@
+{
+  "name": "echo-sonar",
+  "version": "0.1.0",
+  "description": "Acoustic echolocation for iPad: one speaker, one mic, and the gyro for bearing.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "serve": "node tools/serve.js"
+  },
+  "license": "MIT"
+}
