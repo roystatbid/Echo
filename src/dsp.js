@@ -213,7 +213,7 @@ export function detectPeaks(env, threshold, { start = 1, end = env.length - 1, m
     if (v <= threshold[i]) continue;
     if (v < env[i - 1] || v < env[i + 1]) continue;
     const { pos, val } = parabolicPeak(env, i);
-    found.push({ index: i, pos, value: val, snr: threshold[i] > 0 ? val / (threshold[i] / 1) : Infinity });
+    found.push({ index: i, pos, value: val });
   }
   found.sort((a, b) => b.value - a.value);
 
